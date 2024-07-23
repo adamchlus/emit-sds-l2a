@@ -61,14 +61,18 @@ def build_line_masks(start_line: int, stop_line: int, rdnfile: str, locfile: str
 
     rdn_ds = envi.open(envi_header(rdnfile)).open_memmap(interleave='bil')
     loc_ds = envi.open(envi_header(locfile)).open_memmap(interleave='bil')
-    atm_ds = envi.open(envi_header(atmfile)).open_memmap(interleave='bil')
+
+    if atmfile is not None:
+        atm_ds = envi.open(envi_header(atmfile)).open_memmap(interleave='bil')
 
     return_mask = np.zeros((stop_line - start_line, 8, rdn_ds.shape[2]))
     for line in range(start_line, stop_line):
         print(f'{line} / {stop_line - start_line}')
         loc = loc_ds[line,...].copy().astype(np.float32).T
         rdn = rdn_ds[line,...].copy().astype(np.float32).T
-        atm = atm_ds[line,...].copy().astype(np.float32).T
+
+        if atmfile is not None:
+            atm = atm_ds[line,...].copy().astype(np.float32).T
 
         elevation_m = loc[:, 2]
         latitude = loc[:, 1]
@@ -103,11 +107,14 @@ def build_line_masks(start_line: int, stop_line: int, rdnfile: str, locfile: str
         mask[4, :] = np.tan(zen) * max_cloud_height / pixel_size
 
         # AOD 550
-        mask[5, :] = atm[:, aod_bands].sum(axis=1)
+        if atmfile is not None:
+            mask[5, :] = atm[:, aod_bands].sum(axis=1)
+            mask[6, :] = atm[:, h2o_band].T
+        else:
+            mask[5, :] = -1
+            mask[6, :] = -1
 
-        mask[6, :] = atm[:, h2o_band].T
-
-        # Remove water and spacecraft flagsg if cloud flag is on (mostly cosmetic)
+        # Remove water and spacecraft flags if cloud flag is on (mostly cosmetic)
         mask[2:4, np.logical_or(mask[0,:] == 1, mask[1,:] ==1)] = 0
 
         mask[:, bad] = -9999.0
@@ -116,14 +123,25 @@ def build_line_masks(start_line: int, stop_line: int, rdnfile: str, locfile: str
     return return_mask, start_line, stop_line
 
 
+# parser = argparse.ArgumentParser()
+# args = parser.parse_args([])
+# args.rdnfile = f'/Users/achlus/data1/av3/2023/20230711/AV320230711t225833/L1B_RDN/AV320230711t225833_000_L1B_RDN_01f22eae_RDN'
+# args.locfile = f'/Users/achlus/data1/av3/2023/20230711/AV320230711t225833/L1B_ORT/AV320230711t225833_L1B_ORT_d69040b4_LOC'
+# args.outfile = "/Users/achlus/data1/temp/AV320230711t225833_L2A_MSK_01f22eae_MASK"
+# args.irrfile = "/Users/achlus/data1/temp/kurucz_0.1nm.dat"
+# args.atmfile = None
+# args.wavelengths = None
+# args.n_cores =  -1
+# args.aerosol_threshold = 0.5
+
 def main():
 
     parser = argparse.ArgumentParser(description="Remove glint")
     parser.add_argument('rdnfile', type=str, metavar='RADIANCE')
     parser.add_argument('locfile', type=str, metavar='LOCATIONS')
-    parser.add_argument('atmfile', type=str, metavar='SUBSET_LABELS')
     parser.add_argument('irrfile', type=str, metavar='SOLAR_IRRADIANCE')
     parser.add_argument('outfile', type=str, metavar='OUTPUT_MASKS')
+    parser.add_argument('--atmfile', type=str, metavar='SUBSET_LABELS', default=None)
     parser.add_argument('--wavelengths', type=str, default=None)
     parser.add_argument('--n_cores', type=int, default=-1)
     parser.add_argument('--aerosol_threshold', type=float, default=0.5)
@@ -131,15 +149,29 @@ def main():
 
     rdn_hdr = envi.read_envi_header(envi_header(args.rdnfile))
     rdn_shp = envi.open(envi_header(args.rdnfile)).open_memmap(interleave='bil').shape
-    atm_hdr = envi.read_envi_header(envi_header(args.atmfile))
-    atm_shp = envi.open(envi_header(args.atmfile)).open_memmap(interleave='bil').shape
+
+    aod_bands, h2o_band = [], []
+
+    if args.atmfile is not None:
+
+        atm_hdr = envi.read_envi_header(envi_header(args.atmfile))
+        atm_shp = envi.open(envi_header(args.atmfile)).open_memmap(interleave='bil').shape
+
+        if atm_shp[0] != rdn_shp[0] or atm_shp[2] != rdn_shp[2]:
+            raise ValueError('Label and input file dimensions do not match.')
+
+        # Find H2O and AOD elements in state vector
+        for i, name in enumerate(atm_hdr['band names']):
+            if 'H2O' in name:
+                h2o_band.append(i)
+            elif 'AER' in name or 'AOT' in name or 'AOD' in name:
+                aod_bands.append(i)
+
     loc_shp = envi.open(envi_header(args.locfile)).open_memmap(interleave='bil').shape
 
     # Check file size consistency
     if loc_shp[0] != rdn_shp[0] or loc_shp[2] != rdn_shp[2]:
         raise ValueError('LOC and input file dimensions do not match.')
-    if atm_shp[0] != rdn_shp[0] or atm_shp[2] != rdn_shp[2]:
-        raise ValueError('Label and input file dimensions do not match.')
     if loc_shp[1] != 3:
         raise ValueError('LOC file should have three bands.')
 
@@ -156,14 +188,6 @@ def main():
         else:
             fwhm = np.array([float(f) for f in rdn_hdr['fwhm']])
 
-    # Find H2O and AOD elements in state vector
-    aod_bands, h2o_band = [], []
-    for i, name in enumerate(atm_hdr['band names']):
-        if 'H2O' in name:
-            h2o_band.append(i)
-        elif 'AER' in name or 'AOT' in name or 'AOD' in name:
-            aod_bands.append(i)
-
     # find pixel size
     if 'map info' in rdn_hdr.keys():
         pixel_size = float(rdn_hdr['map info'][5].strip())
@@ -178,7 +202,7 @@ def main():
 
     # find solar zenith
     fid = os.path.split(args.rdnfile)[1].split('_')[0]
-    for prefix in ['prm', 'ang', 'emit']:
+    for prefix in ['prm', 'ang', 'emit','AV3']:
         fid = fid.replace(prefix, '')
     dt = datetime.strptime(fid, '%Y%m%dt%H%M%S')
 
@@ -227,7 +251,6 @@ def main():
     bad = np.squeeze(mask[:, 0, :]) <= -9990
     good = np.squeeze(mask[:, 0, :]) > -9990
 
-
     # Create buffer around clouds (main and cirrus)
     cloudinv = np.logical_not(np.squeeze(np.logical_or(mask[:, 0, :], mask[:,1,:])))
     cloudinv[bad] = 1
@@ -243,6 +266,7 @@ def main():
     hdr['band names'] = ['Cloud flag', 'Cirrus flag', 'Water flag',
                          'Spacecraft Flag', 'Dilated Cloud Flag',
                          'AOD550', 'H2O (g cm-2)', 'Aggregate Flag']
+
     hdr['interleave'] = 'bil'
     del hdr['wavelength']
     del hdr['fwhm']
