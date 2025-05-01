@@ -202,7 +202,7 @@ def main():
 
     # find solar zenith
     fid = os.path.split(args.rdnfile)[1].split('_')[0]
-    for prefix in ['prm', 'ang', 'emit','AV3']:
+    for prefix in ['prm', 'ang', 'emit','AV3','AV5']:
         fid = fid.replace(prefix, '')
     dt = datetime.strptime(fid, '%Y%m%dt%H%M%S')
 
